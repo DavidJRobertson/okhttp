@@ -13,10 +13,18 @@
  * See the License for the specific language governing permissions and
  * limitations under the License.
  */
-package okhttp3
+package okhttp3.stress
 
+import okhttp3.Call
+import okhttp3.Callback
+import okhttp3.Dns
 import okhttp3.HttpUrl.Companion.toHttpUrl
+import okhttp3.Interceptor
+import okhttp3.OkHttpClient
+import okhttp3.Protocol
+import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import okhttp3.mockwebserver.Dispatcher
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
@@ -24,11 +32,11 @@ import okhttp3.mockwebserver.RecordedRequest
 import okhttp3.tls.HandshakeCertificates
 import okhttp3.tls.HeldCertificate
 import okio.Buffer
+import okio.ByteString
+import okio.ByteString.Companion.toByteString
 import java.io.IOException
 import java.net.InetAddress
-import java.util.ArrayDeque
-import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicReference
+import java.util.Random
 import java.util.logging.Level
 import java.util.logging.Logger
 
@@ -37,23 +45,31 @@ import java.util.logging.Logger
  *
  * This can be used with tools like Envoy.
  */
-class OkHttpStressTest(
+class StressTest(
   private val maxConcurrentRequests: Int = 100,
   private val logsPerSecond: Int = 10,
   private val protocols: List<Protocol> = listOf(Protocol.HTTP_2, Protocol.HTTP_1_1),
-  private val overridePort: Int? = null
+  private val overridePort: Int? = null,
+  private val requestBodySize: Int = 128,
+  private val responseBodySize: Int = 128
 ) : Dispatcher(), Callback {
   private lateinit var heldCertificate: HeldCertificate
   private lateinit var server: MockWebServer
   private lateinit var client: OkHttpClient
-  private val latestStats = AtomicReference<Stats>()
+  private val statsCollector = StatsCollector()
+  private val responseBodyBytes: ByteString
+  private val requestBodyBytes: ByteString
 
-  private fun addStats(stats: Stats) {
-    while (true) {
-      val before = latestStats.get()
-      val after = (before?.plus(stats) ?: stats).copy(nanotime = System.nanoTime())
-      if (latestStats.compareAndSet(before, after)) return
-    }
+  init {
+    val random = Random(0)
+
+    val responseBodyByteArray = ByteArray(responseBodySize)
+    random.nextBytes(responseBodyByteArray)
+    responseBodyBytes = responseBodyByteArray.toByteString()
+
+    val requestBodyByteArray = ByteArray(requestBodySize)
+    random.nextBytes(requestBodyByteArray)
+    requestBodyBytes = requestBodyByteArray.toByteString()
   }
 
   private fun prepareHeldCertificate() {
@@ -125,6 +141,12 @@ class OkHttpStressTest(
             }
           }
         })
+        .addNetworkInterceptor(object : Interceptor {
+          override fun intercept(chain: Interceptor.Chain): Response {
+            statsCollector.addConnection(chain.connection())
+            return chain.proceed(chain.request())
+          }
+        })
         .build()
   }
 
@@ -132,16 +154,14 @@ class OkHttpStressTest(
     val requestBodySize = request.body.size
     request.body.clear()
 
-    val responseBodyBuffer = Buffer()
-        .writeUtf8("response body")
-    val responseBodySize = responseBodyBuffer.size
+    val responseBodyBuffer = Buffer().write(responseBodyBytes)
 
     val response = MockResponse()
     response.setBody(responseBodyBuffer)
 
-    addStats(Stats(
+    statsCollector.addStats(Stats(
         serverResponses = 1,
-        serverResponseBytes = responseBodySize,
+        serverResponseBytes = responseBodyBytes.size.toLong(),
         serverRequestBytes = requestBodySize
     ))
 
@@ -149,7 +169,7 @@ class OkHttpStressTest(
   }
 
   private fun enqueueCall() {
-    val requestBody = "request body".toRequestBody()
+    val requestBody = requestBodyBytes.toRequestBody()
     val httpUrl = "https://jessetest.local/foo".toHttpUrl().newBuilder()
         .port(overridePort ?: server.port)
         .build()
@@ -158,7 +178,7 @@ class OkHttpStressTest(
         .method("POST", requestBody)
         .build())
 
-    addStats(Stats(
+    statsCollector.addStats(Stats(
         clientRequests = 1,
         clientRequestBytes = requestBody.contentLength()
     ))
@@ -167,7 +187,7 @@ class OkHttpStressTest(
   }
 
   override fun onFailure(call: Call, e: IOException) {
-    addStats(Stats(
+    statsCollector.addStats(Stats(
         clientFailures = 1
     ))
 
@@ -182,10 +202,7 @@ class OkHttpStressTest(
         val responseBodySize = buffer.size
         buffer.clear()
 
-        if (response.isSuccessful) {
-
-        }
-        addStats(Stats(
+        statsCollector.addStats(Stats(
             clientResponses = (if (response.isSuccessful) 1 else 0),
             clientFailures = (if (response.isSuccessful) 0 else 1),
             clientResponseBytes = responseBodySize,
@@ -194,7 +211,7 @@ class OkHttpStressTest(
         ))
       }
     } catch (e: IOException) {
-      addStats(Stats(
+      statsCollector.addStats(Stats(
           clientFailures = 1
       ))
     }
@@ -202,37 +219,8 @@ class OkHttpStressTest(
     enqueueCall()
   }
 
-  data class Stats(
-    val nanotime: Long = 0L,
-    val clientRequests: Long = 0L,
-    val clientFailures: Long = 0L,
-    val clientResponses: Long = 0L,
-    val clientRequestBytes: Long = 0L,
-    val clientResponseBytes: Long = 0L,
-    val clientHttp1Responses: Long = 0L,
-    val clientHttp2Responses: Long = 0L,
-    val serverResponses: Long = 0L,
-    val serverRequestBytes: Long = 0L,
-    val serverResponseBytes: Long = 0L
-  ) {
-    fun plus(other: Stats): Stats {
-      return Stats(
-          clientRequests = clientRequests + other.clientRequests,
-          clientFailures = clientFailures + other.clientFailures,
-          clientResponses = clientResponses + other.clientResponses,
-          clientRequestBytes = clientRequestBytes + other.clientRequestBytes,
-          clientResponseBytes = clientResponseBytes + other.clientResponseBytes,
-          clientHttp1Responses = clientHttp1Responses + other.clientHttp1Responses,
-          clientHttp2Responses = clientHttp2Responses + other.clientHttp2Responses,
-          serverResponses = serverResponses + other.serverResponses,
-          serverRequestBytes = serverRequestBytes + other.serverRequestBytes,
-          serverResponseBytes = serverResponseBytes + other.serverResponseBytes
-      )
-    }
-  }
-
   fun run() {
-    addStats(Stats())
+    statsCollector.addStats(Stats())
 
     prepareHeldCertificate()
     prepareServer()
@@ -242,36 +230,15 @@ class OkHttpStressTest(
       enqueueCall()
     }
 
-    val rollingWindow = ArrayDeque<Stats>()
-    rollingWindow += latestStats.get()
-
-    while (true) {
-      val previous = rollingWindow.first
-      val stats = latestStats.get()
-      printStatsLine(stats, previous)
-      rollingWindow.addLast(stats)
-
-      // Trim the window to 10 seconds
-      while (TimeUnit.NANOSECONDS.toSeconds(stats.nanotime - rollingWindow.first.nanotime) > 10) {
-        rollingWindow.removeFirst()
-      }
-
-      Thread.sleep((1000.0 / logsPerSecond).toLong())
-    }
-  }
-
-  private fun printStatsLine(current: Stats, previous: Stats) {
-    val elapsedSeconds = (current.nanotime - previous.nanotime) / 1e9
-    val qps = (current.clientResponses - previous.clientResponses) / elapsedSeconds
-    println("${"%.2f".format(qps)} qps $current")
+    statsCollector.printStatsContinuously(logsPerSecond)
   }
 }
 
 fun main() {
-  OkHttpStressTest(
+  StressTest(
       maxConcurrentRequests = 50,
-      logsPerSecond = 3,
+      logsPerSecond = 3
 //      protocols = listOf(Protocol.HTTP_1_1),
-      overridePort = 10000
+//      overridePort = 10000
   ).run()
 }

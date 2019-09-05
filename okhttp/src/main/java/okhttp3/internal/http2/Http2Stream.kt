@@ -185,7 +185,7 @@ class Http2Stream internal constructor(
     // flow-control window is fully depleted.
     if (!flushHeaders) {
       synchronized(connection) {
-        flushHeaders = connection.bytesLeftInWriteWindow == 0L
+        flushHeaders = (connection.writeBytesTotal >= connection.writeBytesMaximum)
       }
     }
 

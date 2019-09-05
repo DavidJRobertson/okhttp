@@ -37,7 +37,6 @@ import okio.Sink;
 import okio.Source;
 import okio.Utf8;
 import org.junit.After;
-import org.junit.Before;
 import org.junit.Rule;
 import org.junit.Test;
 import org.junit.rules.TestRule;
@@ -229,7 +228,8 @@ public final class Http2ConnectionTest {
     InFrame frame3 = peer.takeFrame();
     assertThat(frame3.type).isEqualTo(Http2.TYPE_RST_STREAM);
 
-    assertThat(connection.getUnacknowledgedBytesRead()).isEqualTo(2048);
+    assertThat(connection.getReadBytesTotal()).isEqualTo(2048L);
+    assertThat(connection.getReadBytesAcknowledged()).isEqualTo(0L);
   }
 
   @Test public void receiveGoAwayHttp2() throws Exception {
@@ -1749,13 +1749,15 @@ public final class Http2ConnectionTest {
     out1.flush();
 
     // Check that we've filled the window for both the stream and also the connection.
-    assertThat(connection.getBytesLeftInWriteWindow()).isEqualTo(0);
+    assertThat(connection.getWriteBytesMaximum()).isEqualTo(DEFAULT_INITIAL_WINDOW_SIZE);
+    assertThat(connection.getWriteBytesTotal()).isEqualTo(DEFAULT_INITIAL_WINDOW_SIZE);
     assertThat(connection.getStream(3).getBytesLeftInWriteWindow()).isEqualTo(0);
 
     // receiving a window update on the connection will unblock new streams.
     connection.getReaderRunnable().windowUpdate(0, 3);
 
-    assertThat(connection.getBytesLeftInWriteWindow()).isEqualTo(3);
+    assertThat(connection.getWriteBytesMaximum()).isEqualTo(DEFAULT_INITIAL_WINDOW_SIZE + 3);
+    assertThat(connection.getWriteBytesTotal()).isEqualTo(DEFAULT_INITIAL_WINDOW_SIZE);
     assertThat(connection.getStream(3).getBytesLeftInWriteWindow()).isEqualTo(0);
 
     // Another stream should be able to send data even though 1 is blocked.
@@ -1764,7 +1766,8 @@ public final class Http2ConnectionTest {
     out2.writeUtf8("foo");
     out2.flush();
 
-    assertThat(connection.getBytesLeftInWriteWindow()).isEqualTo(0);
+    assertThat(connection.getWriteBytesMaximum()).isEqualTo(DEFAULT_INITIAL_WINDOW_SIZE + 3);
+    assertThat(connection.getWriteBytesTotal()).isEqualTo(DEFAULT_INITIAL_WINDOW_SIZE + 3);
     assertThat(connection.getStream(3).getBytesLeftInWriteWindow()).isEqualTo(0);
     assertThat(connection.getStream(5).getBytesLeftInWriteWindow()).isEqualTo(
         (long) (DEFAULT_INITIAL_WINDOW_SIZE - 3));

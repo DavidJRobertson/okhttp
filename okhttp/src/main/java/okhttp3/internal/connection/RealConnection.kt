@@ -33,7 +33,6 @@ import okhttp3.Response
 import okhttp3.Route
 import okhttp3.internal.EMPTY_RESPONSE
 import okhttp3.internal.closeQuietly
-import okhttp3.internal.toHostHeader
 import okhttp3.internal.http.ExchangeCodec
 import okhttp3.internal.http1.Http1ExchangeCodec
 import okhttp3.internal.http2.ConnectionShutdownException
@@ -44,6 +43,7 @@ import okhttp3.internal.http2.Http2Stream
 import okhttp3.internal.http2.StreamResetException
 import okhttp3.internal.platform.Platform
 import okhttp3.internal.tls.OkHostnameVerifier
+import okhttp3.internal.toHostHeader
 import okhttp3.internal.userAgent
 import okhttp3.internal.ws.RealWebSocket
 import okio.BufferedSink
@@ -628,6 +628,18 @@ class RealConnection(
 
     return true
   }
+
+  val totalBytesRead: Long
+    get() = http2Connection?.readBytesTotal ?: 0L
+
+  val acknowledgedBytesRead: Long
+    get() = http2Connection?.readBytesAcknowledged ?: 0L
+
+  val writeBytesTotal: Long
+    get() = http2Connection?.writeBytesTotal ?: 0L
+
+  val writeBytesMaximum: Long
+    get() = http2Connection?.writeBytesMaximum ?: 0L
 
   /** Refuse incoming streams. */
   @Throws(IOException::class)
