@@ -16,7 +16,9 @@
 package okhttp3.tls
 
 import okhttp3.internal.canParseAsIpAddress
+import okio.Buffer
 import okio.ByteString
+import okio.ByteString.Companion.decodeBase64
 import okio.ByteString.Companion.toByteString
 import org.bouncycastle.asn1.ASN1Encodable
 import org.bouncycastle.asn1.DERSequence
@@ -27,17 +29,21 @@ import org.bouncycastle.asn1.x509.X509Extensions
 import org.bouncycastle.jce.provider.BouncyCastleProvider
 import org.bouncycastle.x509.X509V3CertificateGenerator
 import java.math.BigInteger
+import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
 import java.security.PrivateKey
 import java.security.PublicKey
 import java.security.SecureRandom
 import java.security.Security
+import java.security.cert.CertificateFactory
 import java.security.cert.X509Certificate
 import java.security.interfaces.RSAPrivateKey
+import java.security.spec.PKCS8EncodedKeySpec
 import java.util.Date
 import java.util.UUID
 import java.util.concurrent.TimeUnit
+import java.util.regex.Pattern
 import javax.security.auth.x500.X500Principal
 
 /**
@@ -417,6 +423,41 @@ class HeldCertificate(
       init {
         Security.addProvider(BouncyCastleProvider())
       }
+    }
+  }
+
+  companion object {
+    private val CERTIFICATE_PEM_PATTERN: Pattern = Pattern.compile(
+        """\s*-+BEGIN CERTIFICATE-+([^-]*)-+END CERTIFICATE-+\s*"""
+    )
+    private val PKCS8_PATTERN: Pattern = Pattern.compile(
+        """\s*-+BEGIN PRIVATE KEY-+([^-]*)-+END PRIVATE KEY-+\s*"""
+    )
+
+    private fun decodePem(pem: String): X509Certificate {
+      val certificates = CertificateFactory.getInstance("X.509")
+          .generateCertificates(Buffer().writeUtf8(pem).inputStream())
+      return certificates.iterator().next() as X509Certificate
+    }
+
+    private fun decodePkcs8(pkcs8: String): PrivateKey {
+      // TODO(jwilson): use the certificate type to hint the key type.
+      val keyBytes = pkcs8.decodeBase64()!!
+      val keyFactory = KeyFactory.getInstance("EC")
+      return keyFactory.generatePrivate(PKCS8EncodedKeySpec(keyBytes.toByteArray()))
+    }
+
+    fun decode(certificatePem: String, pkcs8Pem: String): HeldCertificate {
+      val certificateMatcher = CERTIFICATE_PEM_PATTERN.matcher(certificatePem)
+      require(certificateMatcher.matches()) { "Expected a certificate" }
+
+      val pkcs8Matcher = PKCS8_PATTERN.matcher(pkcs8Pem)
+      require(pkcs8Matcher.matches()) { "Expected a private key" }
+
+      val certificate = decodePem(certificatePem)
+      val privateKey = decodePkcs8(pkcs8Matcher.group(1))
+      val keyPair = KeyPair(certificate.publicKey, privateKey)
+      return HeldCertificate(keyPair, certificate)
     }
   }
 }
